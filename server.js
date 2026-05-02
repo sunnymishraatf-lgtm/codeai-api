@@ -1,20 +1,13 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const path = require("path");
 
 const app = express();
 app.use(bodyParser.json());
-app.use(express.static("public"));
 
 // ============================================
-// CONFIGURATION (FIXED)
+// CONFIG (FREE GROQ)
 // ============================================
-
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-
-// ✅ FIX: use working model + env fallback
-const AI_MODEL = process.env.AI_MODEL || "meta-llama/llama-3-8b-instruct";
-
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const PORT = process.env.PORT || 3000;
 
 // ============================================
@@ -37,22 +30,28 @@ Output:
 }
 
 // ============================================
-// AI CALL (FIXED)
+// GROQ AI CALL (FREE)
 // ============================================
 async function getCodeFromAI(question) {
-    if (!OPENROUTER_API_KEY) {
-        throw new Error("No API key set.");
+    if (!GROQ_API_KEY) {
+        throw new Error("No GROQ API key set.");
     }
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
-            "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+            "Authorization": `Bearer ${GROQ_API_KEY}`,
             "Content-Type": "application/json"
         },
         body: JSON.stringify({
-            model: AI_MODEL,
-            messages: [{ role: "user", content: buildPrompt(question) }]
+            model: "llama3-8b-8192",
+            messages: [
+                {
+                    role: "user",
+                    content: buildPrompt(question)
+                }
+            ],
+            temperature: 0.2
         })
     });
 
@@ -74,7 +73,7 @@ app.get("/", (req, res) => {
     res.send("CodeAI API is running 🚀");
 });
 
-// ✅ SIMPLE GET API (NEW - EASY USE)
+// 🔥 EASY GET API
 app.get("/ask", async (req, res) => {
     const question = req.query.q;
 
@@ -91,7 +90,7 @@ app.get("/ask", async (req, res) => {
     }
 });
 
-// POST API
+// POST API (for curl JSON)
 app.post("/solve/raw", async (req, res) => {
     const question = req.body.question;
 
@@ -109,8 +108,11 @@ app.post("/solve/raw", async (req, res) => {
 });
 
 // ============================================
-// START
+// START SERVER
 // ============================================
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log("=================================");
+    console.log("   🚀 CodeAI API (FREE VERSION)");
+    console.log("=================================");
+    console.log(`Running on port ${PORT}`);
 });
