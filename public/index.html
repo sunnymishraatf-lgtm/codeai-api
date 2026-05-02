@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeAI - AI Coding Assistant</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: #1e1e2e;
+            border-radius: 20px;
+            box-shadow: 0 25px 80px rgba(0,0,0,0.5);
+            border: 1px solid #2a2a3e;
+            overflow: hidden;
+        }
+        header {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            padding: 35px;
+            text-align: center;
+        }
+        header h1 { font-size: 2.2rem; margin-bottom: 6px; }
+        header p { opacity: 0.9; font-size: 1rem; }
+        .main {
+            padding: 30px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            color: #a0a0b0;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        textarea {
+            width: 100%;
+            padding: 16px;
+            font-size: 1rem;
+            background: #252538;
+            border: 2px solid #3a3a4e;
+            border-radius: 12px;
+            color: #e0e0e0;
+            outline: none;
+            resize: vertical;
+            font-family: inherit;
+            min-height: 100px;
+        }
+        textarea:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102,126,234,0.15);
+        }
+        textarea::placeholder { color: #6a6a7e; }
+        .btn {
+            width: 100%;
+            padding: 16px;
+            font-size: 1.1rem;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.25s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(102,126,234,0.4);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .result {
+            margin-top: 24px;
+            display: none;
+        }
+        .result.show { display: block; }
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .result-header h3 { color: #e0e0e0; }
+        .copy-btn {
+            padding: 8px 16px;
+            background: #2a2a3e;
+            color: #b0b0c0;
+            border: 1px solid #3a3a4e;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .copy-btn:hover { background: #3a3a4e; color: #e0e0e0; }
+        pre {
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            border-radius: 12px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            border: 1px solid #30363d;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .error {
+            background: #3f1e2e;
+            color: #f48fb1;
+            padding: 16px;
+            border-radius: 10px;
+            margin-top: 20px;
+            border: 1px solid #5f2e3e;
+        }
+        .loading {
+            text-align: center;
+            color: #a0a0b0;
+            margin-top: 20px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid #3a3a4e;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .hint {
+            color: #6a6a7e;
+            font-size: 0.85rem;
+            margin-top: 16px;
+            text-align: center;
+        }
+        .hint code {
+            background: #2a2a3e;
+            padding: 3px 8px;
+            border-radius: 5px;
+            color: #a0a0b0;
+        }
+        footer {
+            text-align: center;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #6a6a7e;
+            font-size: 0.8rem;
+            border-top: 1px solid #2a2a3e;
+        }
+        @media (max-width: 600px) {
+            header h1 { font-size: 1.6rem; }
+            .main { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 CodeAI</h1>
+            <p>Ask any coding question. Get clean code instantly.</p>
+        </header>
+        <div class="main">
+            <div class="input-group">
+                <label for="question">Your Coding Question</label>
+                <textarea id="question" placeholder="e.g., Write a program to reverse a linked list in Java"></textarea>
+            </div>
+            <button class="btn" id="solveBtn" onclick="solve()">🚀 Generate Code</button>
+            <div class="loading" id="loading" style="display:none;">
+                <span class="spinner"></span> Generating code...
+            </div>
+            <div class="error" id="error" style="display:none;"></div>
+            <div class="result" id="result">
+                <div class="result-header">
+                    <h3>✅ Generated Code</h3>
+                    <button class="copy-btn" onclick="copyCode()">📋 Copy</button>
+                </div>
+                <pre id="codeOutput"></pre>
+            </div>
+            <p class="hint">
+                💻 Or use curl: <code>curl -X POST /solve/raw -H "Content-Type: application/json" -d '{"question":"your question"}'</code>
+            </p>
+        </div>
+        <footer>
+            CodeAI API | Powered by AI
+        </footer>
+    </div>
+
+    <script>
+        async function solve() {
+            const question = document.getElementById("question").value.trim();
+            const btn = document.getElementById("solveBtn");
+            const loading = document.getElementById("loading");
+            const error = document.getElementById("error");
+            const result = document.getElementById("result");
+            const codeOutput = document.getElementById("codeOutput");
+
+            if (!question) {
+                error.textContent = "Please enter a question.";
+                error.style.display = "block";
+                return;
+            }
+
+            btn.disabled = true;
+            loading.style.display = "block";
+            error.style.display = "none";
+            result.classList.remove("show");
+
+            try {
+                const res = await fetch("/solve/raw", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ question })
+                });
+
+                const code = await res.text();
+
+                if (!res.ok) {
+                    throw new Error(code);
+                }
+
+                codeOutput.textContent = code;
+                result.classList.add("show");
+            } catch (err) {
+                error.textContent = err.message;
+                error.style.display = "block";
+            } finally {
+                btn.disabled = false;
+                loading.style.display = "none";
+            }
+        }
+
+        function copyCode() {
+            const code = document.getElementById("codeOutput").textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = document.querySelector(".copy-btn");
+                btn.textContent = "✅ Copied!";
+                setTimeout(() => btn.textContent = "📋 Copy", 2000);
+            });
+        }
+
+        document.getElementById("question").addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && e.ctrlKey) solve();
+        });
+    </script>
+</body>
+</html>
