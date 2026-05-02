@@ -7,35 +7,27 @@ app.use(bodyParser.json());
 app.use(express.static("public"));
 
 // ============================================
-// CONFIGURATION
+// CONFIGURATION (FIXED)
 // ============================================
-// Use OpenRouter for FREE AI (no credit card needed)
-// Get key: https://openrouter.ai/keys
+
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const AI_MODEL = process.env.AI_MODEL || "mistralai/mistral-7b-instruct:free";
+
+// ✅ FIX: use working model + env fallback
+const AI_MODEL = process.env.AI_MODEL || "meta-llama/llama-3-8b-instruct";
+
 const PORT = process.env.PORT || 3000;
 
 // ============================================
-// AI PROMPT BUILDER (exact from your spec)
+// PROMPT
 // ============================================
 function buildPrompt(question) {
     return `You are a professional coding assistant.
 
-Your job is to:
-1. Read the user's programming question carefully.
-2. Understand the requirement clearly.
-3. Generate correct and complete code.
-
 Rules:
-- Output ONLY code (no explanation, no comments, no extra text).
-- Keep code simple and beginner-friendly.
-- Use proper syntax and structure.
-- Default language: Java.
-- If user specifies language (like Python, C++, etc.), follow that.
-
-Extra:
-- If question is unclear, assume a reasonable interpretation and solve it.
-- Always give full runnable code.
+- Output ONLY code
+- No explanation
+- Simple beginner-friendly code
+- Default language: Java
 
 User Question:
 ${question}
@@ -45,26 +37,22 @@ Output:
 }
 
 // ============================================
-// AI CALLER (OpenRouter - Free Tier)
+// AI CALL (FIXED)
 // ============================================
 async function getCodeFromAI(question) {
     if (!OPENROUTER_API_KEY) {
-        throw new Error("No API key set. Add OPENROUTER_API_KEY environment variable.");
+        throw new Error("No API key set.");
     }
 
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
             "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://codeai-api.com",
-            "X-Title": "CodeAI API"
+            "Content-Type": "application/json"
         },
         body: JSON.stringify({
             model: AI_MODEL,
-            messages: [{ role: "user", content: buildPrompt(question) }],
-            temperature: 0.2,
-            max_tokens: 2048
+            messages: [{ role: "user", content: buildPrompt(question) }]
         })
     });
 
@@ -81,40 +69,33 @@ async function getCodeFromAI(question) {
 // ROUTES
 // ============================================
 
-// Health check
+// Home
 app.get("/", (req, res) => {
-    res.sendFile(path.join(__dirname, "public", "index.html"));
+    res.send("CodeAI API is running 🚀");
 });
 
-// API: Solve coding question
-app.post("/solve", async (req, res) => {
-    const question = req.body.question;
+// ✅ SIMPLE GET API (NEW - EASY USE)
+app.get("/ask", async (req, res) => {
+    const question = req.query.q;
 
-    if (!question || question.trim() === "") {
-        return res.status(400).json({ error: "Question is required" });
+    if (!question) {
+        return res.send("Error: Question is required");
     }
 
     try {
         const code = await getCodeFromAI(question);
-        res.json({
-            success: true,
-            question: question,
-            code: code,
-            language: detectLanguage(question)
-        });
+        res.type("text/plain");
+        res.send(code);
     } catch (err) {
-        console.error(err);
-        res.status(500).json({
-            error: err.message || "Failed to generate code"
-        });
+        res.send("Error: " + err.message);
     }
 });
 
-// API: Raw code output (for curl)
+// POST API
 app.post("/solve/raw", async (req, res) => {
     const question = req.body.question;
 
-    if (!question || question.trim() === "") {
+    if (!question) {
         return res.status(400).send("Error: Question is required");
     }
 
@@ -123,55 +104,13 @@ app.post("/solve/raw", async (req, res) => {
         res.type("text/plain");
         res.send(code);
     } catch (err) {
-        res.status(500).send(`Error: ${err.message}`);
+        res.status(500).send("Error: " + err.message);
     }
 });
-
-// API: Get supported languages
-app.get("/languages", (req, res) => {
-    res.json([
-        "java", "python", "cpp", "c", "javascript", "typescript",
-        "go", "rust", "kotlin", "swift", "csharp", "php", "ruby"
-    ]);
-});
-
-// ============================================
-// HELPERS
-// ============================================
-function detectLanguage(question) {
-    const q = question.toLowerCase();
-    if (q.includes("python")) return "python";
-    if (q.includes("c++") || q.includes("cpp")) return "cpp";
-    if (q.includes("javascript") || q.includes("js")) return "javascript";
-    if (q.includes("typescript") || q.includes("ts")) return "typescript";
-    if (q.includes("go ") || q.includes("golang")) return "go";
-    if (q.includes("rust")) return "rust";
-    if (q.includes("kotlin")) return "kotlin";
-    if (q.includes("swift")) return "swift";
-    if (q.includes("c#") || q.includes("csharp")) return "csharp";
-    if (q.includes("php")) return "php";
-    if (q.includes("ruby")) return "ruby";
-    if (q.includes("c program") || q.includes(" in c ")) return "c";
-    return "java"; // default
-}
 
 // ============================================
 // START
 // ============================================
 app.listen(PORT, () => {
-    console.log("========================================");
-    console.log("     🤖 CodeAI API Server");
-    console.log("========================================");
-    console.log(` Running on http://localhost:${PORT}`);
-    console.log("");
-    console.log(" Endpoints:");
-    console.log(`   POST http://localhost:${PORT}/solve`);
-    console.log(`   POST http://localhost:${PORT}/solve/raw`);
-    console.log(`   GET  http://localhost:${PORT}/languages`);
-    console.log("");
-    console.log(" Test with curl:");
-    console.log(`   curl -X POST http://localhost:${PORT}/solve/raw \
-     -H "Content-Type: application/json" \
-     -d '{"question":"wap to print nodes of linked list"}'`);
-    console.log("========================================");
+    console.log(`Server running on port ${PORT}`);
 });
