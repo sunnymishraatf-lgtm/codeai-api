@@ -1,5 +1,3 @@
-require("dotenv").config();
-
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
@@ -140,17 +138,16 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
             if (!response.ok) {
                 const errText = await response.text();
                 let errData;
-                try { errData = JSON.parse(errText); } catch { /* ignore */ }
+                try { errData = JSON.parse(errText); } catch {}
 
                 // Handle rate limit specifically
                 if (errData?.error?.code === "rate_limit_exceeded") {
-                    // Extract wait time from message: "Please try again in 20.21s"
                     const waitMsg = errData.error.message || "";
                     const match = waitMsg.match(/in (\d+\.?\d*)s/);
-                    const waitSeconds = match ? parseFloat(match[1]) : 15; // default 15s
+                    const waitSeconds = match ? parseFloat(match[1]) : 15;
                     console.log(`Rate limited, waiting ${waitSeconds}s before retry...`);
                     await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000 + 500));
-                    continue; // retry
+                    continue;
                 }
 
                 throw new Error(`AI API error: ${response.status} - ${errText}`);
@@ -166,7 +163,6 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
         } catch (err) {
             clearTimeout(timeout);
             if (attempt === retries - 1) throw err;
-            // For network errors, wait a bit before retry
             await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
         }
     }
@@ -177,12 +173,10 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
 // ROUTES
 // ============================================
 
-// Home
 app.get("/", (req, res) => {
     res.send("CodeAI API is running 🚀. Use /api/experiments, /api/solution/:filename, /api/ask, /api/fix");
 });
 
-// Health check
 app.get("/api/health", (req, res) => {
     res.json({
         status: "ok",
@@ -191,7 +185,6 @@ app.get("/api/health", (req, res) => {
     });
 });
 
-// List all available experiments
 app.get("/api/experiments", (req, res) => {
     const list = [];
     for (const filename of knownSolutions.keys()) {
@@ -210,7 +203,6 @@ app.get("/api/experiments", (req, res) => {
     res.json(list);
 });
 
-// Get raw code of a specific pre‑saved solution
 app.get("/api/solution/:filename", (req, res) => {
     const code = knownSolutions.get(req.params.filename);
     if (!code) {
@@ -219,7 +211,6 @@ app.get("/api/solution/:filename", (req, res) => {
     res.type("text/plain").send(code);
 });
 
-// Download a solution file directly
 app.get("/api/download/:filename", (req, res) => {
     const filePath = path.join(solutionsDir, req.params.filename);
     if (!fs.existsSync(filePath)) {
@@ -228,7 +219,6 @@ app.get("/api/download/:filename", (req, res) => {
     res.download(filePath);
 });
 
-// GET /ask (AI generation)
 app.get("/ask", async (req, res) => {
     let question = req.query.q;
     let language = (req.query.lang || "java").toLowerCase();
@@ -265,7 +255,6 @@ app.get("/ask", async (req, res) => {
     }
 });
 
-// POST /solve/raw (original)
 app.post("/solve/raw", async (req, res) => {
     const question = req.body.question;
     let language = (req.body.language || "java").toLowerCase();
@@ -287,7 +276,6 @@ app.post("/solve/raw", async (req, res) => {
     }
 });
 
-// POST /api/fix (code fixer)
 app.post("/api/fix", async (req, res) => {
     const code = req.body.code;
     let language = (req.body.language || "java").toLowerCase();
@@ -311,7 +299,7 @@ app.post("/api/fix", async (req, res) => {
 // ============================================
 // START (bind to 0.0.0.0 for Render)
 // ============================================
-const server = app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log("=================================");
     console.log("   🚀 CodeAI API (Enhanced)");
     console.log("=================================");
