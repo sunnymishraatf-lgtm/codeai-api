@@ -4,16 +4,25 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-app.use(bodyParser.json({ limit: "50kb" }));
+app.use(bodyParser.json({ limit: "1mb" }));
 app.use(bodyParser.urlencoded({ extended: false }));
 
 // ============================================
 // CONFIG
 // ============================================
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const API_KEY = process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY || "";
 const PORT = process.env.PORT || 3000;
-const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
+const AI_MODEL = process.env.AI_MODEL || "llama-3.1-8b-instant";
 const solutionsDir = path.join(__dirname, "solutions");
+
+const LANG_CONFIG = {
+    "java": "java",
+    "python": "py",
+    "cpp": "cpp",
+    "c++": "cpp",
+    "vhdl": "vhd"
+};
+const allowedLangs = Object.keys(LANG_CONFIG);
 
 // ============================================
 // PROMPTS
@@ -77,9 +86,14 @@ function loadSolutions() {
     }
     const files = fs.readdirSync(solutionsDir);
     files.forEach(file => {
-        const code = fs.readFileSync(path.join(solutionsDir, file), "utf8");
-        knownSolutions.set(file, code);
-        console.log(`📁 Loaded solution: ${file}`);
+        try {
+            const filePath = path.join(solutionsDir, file);
+            const code = fs.readFileSync(filePath, "utf8");
+            knownSolutions.set(file, code);
+            console.log(`📁 Loaded solution: ${file}`);
+        } catch (err) {
+            console.error(`❌ Failed to load ${file}: ${err.message}`);
+        }
     });
     console.log(`✅ Total solutions loaded: ${knownSolutions.size}`);
 }
@@ -89,26 +103,16 @@ loadSolutions();
 // EXTENSION HELPER
 // ============================================
 function getExtension(lang) {
-    switch (lang) {
-        case "java": return "java";
-        case "python": return "py";
-        case "cpp":
-        case "c++": return "cpp";
-        case "vhdl": return "vhd";
-        default: return "txt";
-    }
+    return LANG_CONFIG[lang] || "txt";
 }
 
 // ============================================
 // GROQ AI CALL (with rate‑limit retry)
 // ============================================
 async function callGroq(systemPrompt, userMessage, retries = 3) {
-    if (!GROQ_API_KEY) {
-        throw new Error("No GROQ API key set.");
+    if (!API_KEY) {
+        throw new Error("No API key set (GROQ_API_KEY or OPENROUTER_API_KEY).");
     }
-
-    // Use a model that rarely hits rate limits
-    const model = "llama-3.1-8b-instant";
 
     for (let attempt = 0; attempt < retries; attempt++) {
         const controller = new AbortController();
@@ -118,11 +122,11 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
                 headers: {
-                    "Authorization": `Bearer ${GROQ_API_KEY}`,
+                    "Authorization": `Bearer ${API_KEY}`,
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                    model,
+                    model: AI_MODEL,
                     messages: [
                         { role: "system", content: systemPrompt },
                         { role: "user", content: userMessage }
@@ -180,7 +184,7 @@ app.get("/", (req, res) => {
 app.get("/api/health", (req, res) => {
     res.json({
         status: "ok",
-        groq: !!GROQ_API_KEY,
+        api_key: !!API_KEY,
         solutions: knownSolutions.size
     });
 });
@@ -190,8 +194,10 @@ app.get("/api/experiments", (req, res) => {
     for (const filename of knownSolutions.keys()) {
         const match = filename.match(/exp(\d+)_q(\d+)/i);
         if (match) {
-            const ext = path.extname(filename).toLowerCase();
-            const lang = { '.java': 'java', '.py': 'python', '.cpp': 'cpp', '.vhd': 'vhdl' }[ext] || 'txt';
+            const fileExt = path.extname(filename).toLowerCase().replace(".", "");
+            // Map extension back to language name for consistency
+            const lang = Object.keys(LANG_CONFIG).find(k => LANG_CONFIG[k] === fileExt) || "txt";
+
             list.push({
                 experiment: parseInt(match[1]),
                 question: parseInt(match[2]),
@@ -204,7 +210,8 @@ app.get("/api/experiments", (req, res) => {
 });
 
 app.get("/api/solution/:filename", (req, res) => {
-    const code = knownSolutions.get(req.params.filename);
+    const safeFilename = path.basename(req.params.filename);
+    const code = knownSolutions.get(safeFilename);
     if (!code) {
         return res.status(404).send("Solution not found.");
     }
@@ -212,7 +219,8 @@ app.get("/api/solution/:filename", (req, res) => {
 });
 
 app.get("/api/download/:filename", (req, res) => {
-    const filePath = path.join(solutionsDir, req.params.filename);
+    const safeFilename = path.basename(req.params.filename);
+    const filePath = path.join(solutionsDir, safeFilename);
     if (!fs.existsSync(filePath)) {
         return res.status(404).send("File not found.");
     }
@@ -240,7 +248,7 @@ app.get("/ask", async (req, res) => {
 
         if (downloadName) {
             const safeName = downloadName.replace(/[^a-z0-9]/gi, "_").toLowerCase();
-            const filename = `${safeName}.${getExtension(language)}`;
+            const filename = `${Date.now()}_${safeName}.${getExtension(language)}`;
             const filepath = path.join(__dirname, filename);
             fs.writeFileSync(filepath, code);
             res.download(filepath, filename, () => {
@@ -252,6 +260,35 @@ app.get("/ask", async (req, res) => {
         }
     } catch (err) {
         res.status(500).send("Error: " + err.message);
+    }
+});
+
+app.get("/languages", (req, res) => {
+    res.json(allowedLangs);
+});
+
+app.post("/solve", async (req, res) => {
+    const question = req.body.question;
+    let language = (req.body.language || "java").toLowerCase();
+
+    if (!question) {
+        return res.status(400).json({ success: false, error: "Question is required" });
+    }
+    if (language === "c++") language = "cpp";
+    if (!allowedLangs.includes(language)) {
+        return res.status(400).json({ success: false, error: "Unsupported language" });
+    }
+
+    try {
+        const code = await callGroq(SYSTEM_PROMPT, `Language: ${language}\nQuestion: ${question}`);
+        res.json({
+            success: true,
+            question,
+            code,
+            language
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -296,6 +333,12 @@ app.post("/api/fix", async (req, res) => {
     }
 });
 
+// Global Error Handler
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).send("Something went wrong!");
+});
+
 // ============================================
 // START (bind to 0.0.0.0 for Render)
 // ============================================
@@ -304,6 +347,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log("   🚀 CodeAI API (Enhanced)");
     console.log("=================================");
     console.log(`Running on port ${PORT}`);
-    console.log(`GROQ API: ${GROQ_API_KEY ? "✅" : "❌"}`);
+    console.log(`API Key: ${API_KEY ? "✅" : "❌"}`);
     console.log(`Pre‑loaded solutions: ${knownSolutions.size}`);
 });
