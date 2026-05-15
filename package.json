@@ -1,10 +1,11 @@
 {
   "name": "codeai-api",
   "version": "1.0.0",
-  "description": "CodeAI API with MiniMax via OpenRouter",
+  "description": "AI Coding Assistant API - Ask coding questions, get clean code",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
