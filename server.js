@@ -8,7 +8,7 @@ app.use(bodyParser.json({ limit: "50kb" }));
 app.use(bodyParser.urlencoded({ extended: false }));
 
 // ----------------------------------------------------------------------
-// CONFIG – Render provides PORT, you set GROQ_API_KEY in dashboard
+// CONFIG
 // ----------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
@@ -16,7 +16,7 @@ const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
 const solutionsDir = path.join(__dirname, "solutions");
 
 // ----------------------------------------------------------------------
-// PROMPTS (unchanged from your original – works well)
+// PROMPTS
 // ----------------------------------------------------------------------
 const SYSTEM_PROMPT = `
 You are a senior software engineer and competitive programming expert.
@@ -65,23 +65,19 @@ STRICT RULES:
 `;
 
 // ----------------------------------------------------------------------
-// LOAD PRE‑SAVED SOLUTIONS
+// LOAD SOLUTIONS
 // ----------------------------------------------------------------------
 const knownSolutions = new Map();
-function loadSolutions() {
-    if (!fs.existsSync(solutionsDir)) {
-        fs.mkdirSync(solutionsDir);
-        console.log("Created solutions/ folder.");
-        return;
+try {
+    if (fs.existsSync(solutionsDir)) {
+        fs.readdirSync(solutionsDir).forEach(file => {
+            knownSolutions.set(file, fs.readFileSync(path.join(solutionsDir, file), "utf8"));
+        });
+        console.log(`Loaded ${knownSolutions.size} solutions.`);
     }
-    const files = fs.readdirSync(solutionsDir);
-    files.forEach(file => {
-        const code = fs.readFileSync(path.join(solutionsDir, file), "utf8");
-        knownSolutions.set(file, code);
-    });
-    console.log(`Loaded ${knownSolutions.size} solutions.`);
+} catch (err) {
+    console.error("Solution loading error:", err.message);
 }
-loadSolutions();
 
 // ----------------------------------------------------------------------
 // HELPERS
@@ -98,17 +94,13 @@ function getExtension(lang) {
 }
 
 // ----------------------------------------------------------------------
-// GROQ AI CALL with automatic retry on rate limits
+// AI CALL WITH RETRY
 // ----------------------------------------------------------------------
 async function callGroq(systemPrompt, userMessage, retries = 3) {
     if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
-
-    const model = "llama-3.1-8b-instant";   // safe, rarely throttled
+    const model = "llama-3.1-8b-instant";
 
     for (let attempt = 0; attempt < retries; attempt++) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 25000);
-
         try {
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
@@ -125,23 +117,18 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
                     temperature: 0.2,
                     max_tokens: 4000
                 }),
-                signal: controller.signal
+                signal: AbortSignal.timeout(25000)
             });
-
-            clearTimeout(timeout);
 
             if (!response.ok) {
                 const errText = await response.text();
-                let errData;
-                try { errData = JSON.parse(errText); } catch {}
-                if (errData?.error?.code === "rate_limit_exceeded") {
-                    const waitMsg = errData.error.message || "";
-                    const sec = parseFloat((waitMsg.match(/in (\d+\.?\d*)s/) || [])[1]) || 15;
+                if (errText.includes("rate_limit_exceeded")) {
+                    const sec = parseFloat((errText.match(/in (\d+\.?\d*)s/) || [])[1]) || 15;
                     console.log(`Rate limited, waiting ${sec}s`);
                     await new Promise(r => setTimeout(r, sec * 1000 + 500));
                     continue;
                 }
-                throw new Error(`AI error: ${response.status} ${errText}`);
+                throw new Error(`AI API ${response.status}: ${errText}`);
             }
 
             const data = await response.json();
@@ -149,8 +136,8 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
             code = code.replace(/```[\w]*\n?([\s\S]*?)\n?```/g, "$1").replace(/```/g, "");
             return code.trim();
         } catch (err) {
-            clearTimeout(timeout);
             if (attempt === retries - 1) throw err;
+            console.log(`Retry ${attempt + 1} after error: ${err.message}`);
             await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
         }
     }
@@ -160,12 +147,16 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
 // ----------------------------------------------------------------------
 // ROUTES
 // ----------------------------------------------------------------------
-app.get("/", (req, res) => res.send("CodeAI API running. Use /api/experiments, /api/solution/:file, /api/ask, /api/fix"));
 
+// Test endpoint – no dependencies
+app.get("/test", (req, res) => res.send("Server is alive ✅"));
+
+// Health
 app.get("/api/health", (req, res) =>
     res.json({ status: "ok", groq: !!GROQ_API_KEY, solutions: knownSolutions.size })
 );
 
+// Experiments list
 app.get("/api/experiments", (req, res) => {
     const list = [];
     for (const [filename] of knownSolutions) {
@@ -175,18 +166,21 @@ app.get("/api/experiments", (req, res) => {
     res.json(list);
 });
 
+// Get a solution
 app.get("/api/solution/:filename", (req, res) => {
     const code = knownSolutions.get(req.params.filename);
-    if (!code) return res.status(404).send("Not found");
+    if (!code) return res.status(404).send("Solution not found");
     res.type("text/plain").send(code);
 });
 
+// Download a solution
 app.get("/api/download/:filename", (req, res) => {
     const filePath = path.join(solutionsDir, req.params.filename);
-    if (!fs.existsSync(filePath)) return res.status(404).send("Not found");
+    if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
     res.download(filePath);
 });
 
+// AI generation (GET)
 app.get("/ask", async (req, res) => {
     try {
         let q = req.query.q;
@@ -197,6 +191,7 @@ app.get("/ask", async (req, res) => {
         q = q.replace(/[-_]/g, " ");
 
         const code = await callGroq(SYSTEM_PROMPT, `Language: ${lang}\nQuestion: ${q}`);
+
         if (req.query.download) {
             const safeName = req.query.download.replace(/[^a-z0-9]/gi, "_").toLowerCase();
             const filename = `${safeName}.${getExtension(lang)}`;
@@ -207,10 +202,12 @@ app.get("/ask", async (req, res) => {
             res.type("text/plain").send(code);
         }
     } catch (err) {
+        console.error("GET /ask error:", err);
         res.status(500).send("Error: " + err.message);
     }
 });
 
+// AI generation (POST)
 app.post("/solve/raw", async (req, res) => {
     try {
         const q = req.body.question;
@@ -222,10 +219,12 @@ app.post("/solve/raw", async (req, res) => {
         const code = await callGroq(SYSTEM_PROMPT, `Language: ${lang}\nQuestion: ${q}`);
         res.type("text/plain").send(code);
     } catch (err) {
+        console.error("POST /solve/raw error:", err);
         res.status(500).send("Error: " + err.message);
     }
 });
 
+// Code fixer
 app.post("/api/fix", async (req, res) => {
     try {
         const code = req.body.code;
@@ -237,13 +236,23 @@ app.post("/api/fix", async (req, res) => {
         const fixed = await callGroq(FIX_PROMPT, `Language: ${lang}\nBuggy Code:\n${code}`);
         res.json({ fixedCode: fixed, language: lang });
     } catch (err) {
+        console.error("POST /api/fix error:", err);
         res.status(500).json({ error: err.message });
     }
 });
 
 // ----------------------------------------------------------------------
-// START (must bind to 0.0.0.0 for Render)
+// GLOBAL ERROR HANDLER – keeps server alive no matter what
+// ----------------------------------------------------------------------
+app.use((err, req, res, next) => {
+    console.error("Unhandled error:", err);
+    res.status(500).send("Internal server error");
+});
+
+// ----------------------------------------------------------------------
+// START
 // ----------------------------------------------------------------------
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`GROQ_API_KEY ${GROQ_API_KEY ? "set" : "NOT SET"}`);
 });
