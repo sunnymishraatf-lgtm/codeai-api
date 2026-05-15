@@ -16,21 +16,35 @@ const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
 // ============================================
 // PROMPT
 // ============================================
-function buildPrompt(question, language = "java") {
-    return `You are a professional coding assistant.
+const SYSTEM_PROMPT = `
+You are an expert programming assistant.
 
-Rules:
-- Output ONLY code
-- No explanation
-- Simple beginner-friendly code
-- Language: ${language}
+Your job is to return ONLY the final working source code based on the user's question.
 
-User Question:
-${question}
+STRICT RULES:
+1. Output ONLY raw code.
+2. Do NOT use markdown formatting.
+3. Do NOT add explanations, comments, notes, headings, or extra text.
+4. Do NOT repeat the question.
+5. Do NOT include \`\`\` or language tags.
+6. Generate complete and executable code.
+7. The code must directly solve the exact problem asked by the user.
+8. Keep the code simple, clean, and beginner-friendly.
+9. Avoid unnecessary complexity.
+10. Use fast and optimized logic when possible.
+11. Include all required imports/libraries.
+12. If input/output format is mentioned, follow it exactly.
+13. Do not leave incomplete functions or placeholders.
+14. If multiple approaches exist, return the most reliable one.
+15. Ensure the code runs without syntax errors.
+16. Use only the programming language requested by the user.
+17. Never give pseudocode.
+18. Never explain anything before or after the code.
+19. If the user provides buggy code, return the corrected full code only.
+20. Always prioritize correctness over creativity.
 
-Output:
-<only code>`;
-}
+Your response must contain nothing except the final code.
+`;
 
 // ============================================
 // EXTENSION HELPER
@@ -49,7 +63,7 @@ function getExtension(lang) {
 // ============================================
 // GROQ AI CALL
 // ============================================
-async function getCodeFromAI(prompt) {
+async function getCodeFromAI(question, language) {
     if (!GROQ_API_KEY) {
         throw new Error("No GROQ API key set.");
     }
@@ -62,7 +76,10 @@ async function getCodeFromAI(prompt) {
         },
         body: JSON.stringify({
             model: "llama-3.1-8b-instant",
-            messages: [{ role: "user", content: prompt }],
+            messages: [
+                { role: "system", content: SYSTEM_PROMPT },
+                { role: "user", content: `Language: ${language}\nQuestion: ${question}` }
+            ],
             temperature: 0.2
         })
     });
@@ -73,7 +90,13 @@ async function getCodeFromAI(prompt) {
     }
 
     const data = await response.json();
-    return data.choices[0].message.content;
+    let code = data.choices[0].message.content;
+
+    // Post-processing: Strip markdown code blocks if the AI included them
+    code = code.replace(/```[\w]*\n([\s\S]*?)\n```/g, '$1'); // Removes ```lang ... ```
+    code = code.replace(/```/g, ''); // Removes stray backticks
+    
+    return code.trim();
 }
 
 // ============================================
@@ -107,8 +130,7 @@ app.get("/ask", async (req, res) => {
     }
 
     try {
-        const prompt = buildPrompt(question, language);
-        const code = await getCodeFromAI(prompt);
+        const code = await getCodeFromAI(question, language);
 
         // 🔥 DOWNLOAD MODE (custom filename)
         if (downloadName) {
@@ -149,8 +171,7 @@ app.post("/solve/raw", async (req, res) => {
     }
 
     try {
-        const prompt = buildPrompt(question, language);
-        const code = await getCodeFromAI(prompt);
+        const code = await getCodeFromAI(question, language);
 
         res.type("text/plain");
         res.send(code);
