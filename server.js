@@ -7,26 +7,19 @@ const app = express();
 app.use(bodyParser.json({ limit: "50kb" }));
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// ----------------------------------------------------------------------
-// CONFIG (Render provides PORT; you set the OpenRouter env vars)
-// ----------------------------------------------------------------------
+// ---- Config ----
 const PORT = process.env.PORT || 3000;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const MODEL_NAME = process.env.MODEL_NAME || "MiniMaxAI/MiniMax-M2.7";
 const BASE_URL = process.env.BASE_URL || "https://openrouter.ai/api/v1";
-
 const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
 const solutionsDir = path.join(__dirname, "solutions");
 
-// ----------------------------------------------------------------------
-// PROMPTS (use your exact wording – I'll keep them short for readability)
-// ----------------------------------------------------------------------
-const SYSTEM_PROMPT = `You are a senior software engineer... [your full prompt]`;
-const FIX_PROMPT = `You are an expert debugger... [your full prompt]`;
+// ---- Prompts (insert your full prompts here) ----
+const SYSTEM_PROMPT = `You are a senior software engineer... [your complete prompt]`;
+const FIX_PROMPT = `You are an expert debugger... [your complete prompt]`;
 
-// ----------------------------------------------------------------------
-// LOAD SOLUTIONS (safe)
-// ----------------------------------------------------------------------
+// ---- Load solutions ----
 const knownSolutions = new Map();
 try {
   if (fs.existsSync(solutionsDir)) {
@@ -34,28 +27,23 @@ try {
       knownSolutions.set(file, fs.readFileSync(path.join(solutionsDir, file), "utf8"));
     });
     console.log(`Loaded ${knownSolutions.size} solutions.`);
-  } else {
-    console.log("Solutions folder missing – skipping.");
   }
-} catch (err) {
-  console.error("Solution loading error (ignored):", err.message);
-}
+} catch (e) { console.error("Solutions load error:", e.message); }
 
-// ----------------------------------------------------------------------
-// HELPERS
-// ----------------------------------------------------------------------
+// ---- Helpers ----
 function getExtension(lang) {
-  const map = { java: "java", python: "py", cpp: "cpp", "c++": "cpp", vhdl: "vhd" };
-  return map[lang] || "txt";
+  return { java: "java", python: "py", cpp: "cpp", "c++": "cpp", vhdl: "vhd" }[lang] || "txt";
 }
 
-// AI call using OpenRouter (OpenAI-compatible endpoint)
 async function callAI(systemPrompt, userMessage, retries = 3) {
   if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not configured");
 
+  const url = `${BASE_URL}/chat/completions`;
+  console.log(`Calling AI at ${url}`);
+
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const response = await fetch(`${BASE_URL}/chat/completions`, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
@@ -75,9 +63,8 @@ async function callAI(systemPrompt, userMessage, retries = 3) {
 
       if (!response.ok) {
         const errText = await response.text();
-        // OpenRouter returns a Retry-After header when rate limited
-        const retryAfter = response.headers.get("Retry-After");
-        if (retryAfter) {
+        if (response.status === 429) {
+          const retryAfter = response.headers.get("Retry-After");
           const sec = parseInt(retryAfter) || 15;
           console.log(`Rate limited – waiting ${sec}s`);
           await new Promise(r => setTimeout(r, sec * 1000 + 500));
@@ -88,36 +75,27 @@ async function callAI(systemPrompt, userMessage, retries = 3) {
 
       const data = await response.json();
       let code = data.choices[0].message.content;
-      // Strip any markdown
       code = code.replace(/```[\w]*\n?([\s\S]*?)\n?```/g, "$1").replace(/```/g, "");
       return code.trim();
     } catch (err) {
       if (attempt === retries - 1) throw err;
-      console.log(`Retry ${attempt + 1} after: ${err.message}`);
+      console.log(`Retry ${attempt + 1}: ${err.message}`);
       await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
     }
   }
   throw new Error("Failed after retries");
 }
 
-// ----------------------------------------------------------------------
-// ROUTES
-// ----------------------------------------------------------------------
+// ---- Routes (all error‑handled) ----
+app.get("/test", (req, res) => res.send("✅ MiniMax server is alive"));
 
-// Always‑on test endpoint
-app.get("/test", (req, res) => res.send("✅ Server is alive (MiniMax)"));
+app.get("/api/health", (req, res) => res.json({
+  status: "ok",
+  ai: !!OPENROUTER_API_KEY,
+  model: MODEL_NAME,
+  solutions: knownSolutions.size,
+}));
 
-// Health
-app.get("/api/health", (req, res) =>
-  res.json({
-    status: "ok",
-    ai: !!OPENROUTER_API_KEY,
-    model: MODEL_NAME,
-    solutions: knownSolutions.size,
-  })
-);
-
-// List experiments
 app.get("/api/experiments", (req, res) => {
   const list = [];
   for (const [filename] of knownSolutions) {
@@ -127,21 +105,18 @@ app.get("/api/experiments", (req, res) => {
   res.json(list);
 });
 
-// Get a solution
 app.get("/api/solution/:filename", (req, res) => {
   const code = knownSolutions.get(req.params.filename);
-  if (!code) return res.status(404).send("Solution not found");
+  if (!code) return res.status(404).send("Not found");
   res.type("text/plain").send(code);
 });
 
-// Download a solution
 app.get("/api/download/:filename", (req, res) => {
   const filePath = path.join(solutionsDir, req.params.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
+  if (!fs.existsSync(filePath)) return res.status(404).send("Not found");
   res.download(filePath);
 });
 
-// AI code generation (GET)
 app.get("/ask", async (req, res) => {
   try {
     let q = req.query.q;
@@ -163,12 +138,11 @@ app.get("/ask", async (req, res) => {
       res.type("text/plain").send(code);
     }
   } catch (err) {
-    console.error("GET /ask error:", err);
+    console.error("/ask error:", err);
     res.status(500).send("Error: " + err.message);
   }
 });
 
-// AI code generation (POST)
 app.post("/solve/raw", async (req, res) => {
   try {
     const q = req.body.question;
@@ -180,12 +154,11 @@ app.post("/solve/raw", async (req, res) => {
     const code = await callAI(SYSTEM_PROMPT, `Language: ${lang}\nQuestion: ${q}`);
     res.type("text/plain").send(code);
   } catch (err) {
-    console.error("POST /solve/raw error:", err);
+    console.error("/solve/raw error:", err);
     res.status(500).send("Error: " + err.message);
   }
 });
 
-// Code fixer
 app.post("/api/fix", async (req, res) => {
   try {
     const code = req.body.code;
@@ -197,16 +170,12 @@ app.post("/api/fix", async (req, res) => {
     const fixed = await callAI(FIX_PROMPT, `Language: ${lang}\nBuggy Code:\n${code}`);
     res.json({ fixedCode: fixed, language: lang });
   } catch (err) {
-    console.error("POST /api/fix error:", err);
+    console.error("/api/fix error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ----------------------------------------------------------------------
-// START (must bind 0.0.0.0 for Render)
-// ----------------------------------------------------------------------
+// ---- Start ----
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Model: ${MODEL_NAME}`);
-  console.log(`OpenRouter key ${OPENROUTER_API_KEY ? "set" : "NOT SET"}`);
+  console.log(`Server running on port ${PORT}, model=${MODEL_NAME}`);
 });
