@@ -1,7 +1,7 @@
 {
   "name": "codeai-api",
   "version": "1.0.0",
-  "description": "CodeAI API with solutions and code fixer",
+  "description": "CodeAI API with OpenRouter (MiniMax) and code fixer",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
