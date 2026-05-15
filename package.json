@@ -1,11 +1,10 @@
 {
   "name": "codeai-api",
   "version": "1.0.0",
-  "description": "AI Coding Assistant API with pre-loaded solutions and code fixing",
+  "description": "CodeAI API with solutions and code fixer",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -13,8 +12,5 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "keywords": ["ai", "code", "api", "groq"],
-  "author": "",
-  "license": "MIT"
+  }
 }

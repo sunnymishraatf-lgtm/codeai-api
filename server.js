@@ -4,29 +4,20 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-app.use(bodyParser.json({ limit: "1mb" }));
+app.use(bodyParser.json({ limit: "50kb" }));
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// ============================================
-// CONFIG
-// ============================================
-const API_KEY = process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY || "";
+// ----------------------------------------------------------------------
+// CONFIG – Render provides PORT, you set GROQ_API_KEY in dashboard
+// ----------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
-const AI_MODEL = process.env.AI_MODEL || "llama-3.1-8b-instant";
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
 const solutionsDir = path.join(__dirname, "solutions");
 
-const LANG_CONFIG = {
-    "java": "java",
-    "python": "py",
-    "cpp": "cpp",
-    "c++": "cpp",
-    "vhdl": "vhd"
-};
-const allowedLangs = Object.keys(LANG_CONFIG);
-
-// ============================================
-// PROMPTS
-// ============================================
+// ----------------------------------------------------------------------
+// PROMPTS (unchanged from your original – works well)
+// ----------------------------------------------------------------------
 const SYSTEM_PROMPT = `
 You are a senior software engineer and competitive programming expert.
 
@@ -73,46 +64,46 @@ STRICT RULES:
 10. The final response must contain ONLY the corrected code.
 `;
 
-// ============================================
-// LOAD PRE‑SAVED SOLUTIONS (from /solutions folder)
-// ============================================
+// ----------------------------------------------------------------------
+// LOAD PRE‑SAVED SOLUTIONS
+// ----------------------------------------------------------------------
 const knownSolutions = new Map();
-
 function loadSolutions() {
     if (!fs.existsSync(solutionsDir)) {
         fs.mkdirSync(solutionsDir);
-        console.log("Created 'solutions/' folder. Add your .java/.py files there.");
+        console.log("Created solutions/ folder.");
         return;
     }
     const files = fs.readdirSync(solutionsDir);
     files.forEach(file => {
-        try {
-            const filePath = path.join(solutionsDir, file);
-            const code = fs.readFileSync(filePath, "utf8");
-            knownSolutions.set(file, code);
-            console.log(`📁 Loaded solution: ${file}`);
-        } catch (err) {
-            console.error(`❌ Failed to load ${file}: ${err.message}`);
-        }
+        const code = fs.readFileSync(path.join(solutionsDir, file), "utf8");
+        knownSolutions.set(file, code);
     });
-    console.log(`✅ Total solutions loaded: ${knownSolutions.size}`);
+    console.log(`Loaded ${knownSolutions.size} solutions.`);
 }
 loadSolutions();
 
-// ============================================
-// EXTENSION HELPER
-// ============================================
+// ----------------------------------------------------------------------
+// HELPERS
+// ----------------------------------------------------------------------
 function getExtension(lang) {
-    return LANG_CONFIG[lang] || "txt";
+    switch (lang) {
+        case "java": return "java";
+        case "python": return "py";
+        case "cpp":
+        case "c++": return "cpp";
+        case "vhdl": return "vhd";
+        default: return "txt";
+    }
 }
 
-// ============================================
-// GROQ AI CALL (with rate‑limit retry)
-// ============================================
+// ----------------------------------------------------------------------
+// GROQ AI CALL with automatic retry on rate limits
+// ----------------------------------------------------------------------
 async function callGroq(systemPrompt, userMessage, retries = 3) {
-    if (!API_KEY) {
-        throw new Error("No API key set (GROQ_API_KEY or OPENROUTER_API_KEY).");
-    }
+    if (!GROQ_API_KEY) throw new Error("GROQ_API_KEY not configured");
+
+    const model = "llama-3.1-8b-instant";   // safe, rarely throttled
 
     for (let attempt = 0; attempt < retries; attempt++) {
         const controller = new AbortController();
@@ -122,11 +113,11 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
                 headers: {
-                    "Authorization": `Bearer ${API_KEY}`,
+                    Authorization: `Bearer ${GROQ_API_KEY}`,
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                    model: AI_MODEL,
+                    model,
                     messages: [
                         { role: "system", content: systemPrompt },
                         { role: "user", content: userMessage }
@@ -143,210 +134,116 @@ async function callGroq(systemPrompt, userMessage, retries = 3) {
                 const errText = await response.text();
                 let errData;
                 try { errData = JSON.parse(errText); } catch {}
-
-                // Handle rate limit specifically
                 if (errData?.error?.code === "rate_limit_exceeded") {
                     const waitMsg = errData.error.message || "";
-                    const match = waitMsg.match(/in (\d+\.?\d*)s/);
-                    const waitSeconds = match ? parseFloat(match[1]) : 15;
-                    console.log(`Rate limited, waiting ${waitSeconds}s before retry...`);
-                    await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000 + 500));
+                    const sec = parseFloat((waitMsg.match(/in (\d+\.?\d*)s/) || [])[1]) || 15;
+                    console.log(`Rate limited, waiting ${sec}s`);
+                    await new Promise(r => setTimeout(r, sec * 1000 + 500));
                     continue;
                 }
-
-                throw new Error(`AI API error: ${response.status} - ${errText}`);
+                throw new Error(`AI error: ${response.status} ${errText}`);
             }
 
             const data = await response.json();
             let code = data.choices[0].message.content;
-
-            // Strip markdown
-            code = code.replace(/```[\w]*\n?([\s\S]*?)\n?```/g, "$1");
-            code = code.replace(/```/g, "");
+            code = code.replace(/```[\w]*\n?([\s\S]*?)\n?```/g, "$1").replace(/```/g, "");
             return code.trim();
         } catch (err) {
             clearTimeout(timeout);
             if (attempt === retries - 1) throw err;
-            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
         }
     }
-    throw new Error("Failed after multiple retries");
+    throw new Error("Failed after retries");
 }
 
-// ============================================
+// ----------------------------------------------------------------------
 // ROUTES
-// ============================================
+// ----------------------------------------------------------------------
+app.get("/", (req, res) => res.send("CodeAI API running. Use /api/experiments, /api/solution/:file, /api/ask, /api/fix"));
 
-app.get("/", (req, res) => {
-    res.send("CodeAI API is running 🚀. Use /api/experiments, /api/solution/:filename, /api/ask, /api/fix");
-});
-
-app.get("/api/health", (req, res) => {
-    res.json({
-        status: "ok",
-        api_key: !!API_KEY,
-        solutions: knownSolutions.size
-    });
-});
+app.get("/api/health", (req, res) =>
+    res.json({ status: "ok", groq: !!GROQ_API_KEY, solutions: knownSolutions.size })
+);
 
 app.get("/api/experiments", (req, res) => {
     const list = [];
-    for (const filename of knownSolutions.keys()) {
-        const match = filename.match(/exp(\d+)_q(\d+)/i);
-        if (match) {
-            const fileExt = path.extname(filename).toLowerCase().replace(".", "");
-            // Map extension back to language name for consistency
-            const lang = Object.keys(LANG_CONFIG).find(k => LANG_CONFIG[k] === fileExt) || "txt";
-
-            list.push({
-                experiment: parseInt(match[1]),
-                question: parseInt(match[2]),
-                filename,
-                language: lang
-            });
-        }
+    for (const [filename] of knownSolutions) {
+        const m = filename.match(/exp(\d+)_q(\d+)/i);
+        if (m) list.push({ experiment: +m[1], question: +m[2], filename });
     }
     res.json(list);
 });
 
 app.get("/api/solution/:filename", (req, res) => {
-    const safeFilename = path.basename(req.params.filename);
-    const code = knownSolutions.get(safeFilename);
-    if (!code) {
-        return res.status(404).send("Solution not found.");
-    }
+    const code = knownSolutions.get(req.params.filename);
+    if (!code) return res.status(404).send("Not found");
     res.type("text/plain").send(code);
 });
 
 app.get("/api/download/:filename", (req, res) => {
-    const safeFilename = path.basename(req.params.filename);
-    const filePath = path.join(solutionsDir, safeFilename);
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).send("File not found.");
-    }
+    const filePath = path.join(solutionsDir, req.params.filename);
+    if (!fs.existsSync(filePath)) return res.status(404).send("Not found");
     res.download(filePath);
 });
 
 app.get("/ask", async (req, res) => {
-    let question = req.query.q;
-    let language = (req.query.lang || "java").toLowerCase();
-    const downloadName = req.query.download;
-
-    if (!question) {
-        return res.status(400).send("Error: Question is required");
-    }
-
-    question = question.replace(/[-_]/g, " ");
-
-    if (language === "c++") language = "cpp";
-    if (!allowedLangs.includes(language)) {
-        return res.status(400).send("Error: Unsupported language");
-    }
-
     try {
-        const code = await callGroq(SYSTEM_PROMPT, `Language: ${language}\nQuestion: ${question}`);
+        let q = req.query.q;
+        if (!q) return res.status(400).send("Question required");
+        let lang = (req.query.lang || "java").toLowerCase();
+        if (lang === "c++") lang = "cpp";
+        if (!allowedLangs.includes(lang)) return res.status(400).send("Unsupported language");
+        q = q.replace(/[-_]/g, " ");
 
-        if (downloadName) {
-            const safeName = downloadName.replace(/[^a-z0-9]/gi, "_").toLowerCase();
-            const filename = `${Date.now()}_${safeName}.${getExtension(language)}`;
+        const code = await callGroq(SYSTEM_PROMPT, `Language: ${lang}\nQuestion: ${q}`);
+        if (req.query.download) {
+            const safeName = req.query.download.replace(/[^a-z0-9]/gi, "_").toLowerCase();
+            const filename = `${safeName}.${getExtension(lang)}`;
             const filepath = path.join(__dirname, filename);
             fs.writeFileSync(filepath, code);
-            res.download(filepath, filename, () => {
-                fs.unlinkSync(filepath);
-            });
+            res.download(filepath, filename, () => fs.unlinkSync(filepath));
         } else {
-            res.type("text/plain");
-            res.send(code);
+            res.type("text/plain").send(code);
         }
     } catch (err) {
         res.status(500).send("Error: " + err.message);
     }
 });
 
-app.get("/languages", (req, res) => {
-    res.json(allowedLangs);
-});
-
-app.post("/solve", async (req, res) => {
-    const question = req.body.question;
-    let language = (req.body.language || "java").toLowerCase();
-
-    if (!question) {
-        return res.status(400).json({ success: false, error: "Question is required" });
-    }
-    if (language === "c++") language = "cpp";
-    if (!allowedLangs.includes(language)) {
-        return res.status(400).json({ success: false, error: "Unsupported language" });
-    }
-
-    try {
-        const code = await callGroq(SYSTEM_PROMPT, `Language: ${language}\nQuestion: ${question}`);
-        res.json({
-            success: true,
-            question,
-            code,
-            language
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
 app.post("/solve/raw", async (req, res) => {
-    const question = req.body.question;
-    let language = (req.body.language || "java").toLowerCase();
-
-    if (!question) {
-        return res.status(400).send("Error: Question is required");
-    }
-    if (language === "c++") language = "cpp";
-    if (!allowedLangs.includes(language)) {
-        return res.status(400).send("Error: Unsupported language");
-    }
-
     try {
-        const code = await callGroq(SYSTEM_PROMPT, `Language: ${language}\nQuestion: ${question}`);
-        res.type("text/plain");
-        res.send(code);
+        const q = req.body.question;
+        if (!q) return res.status(400).send("Question required");
+        let lang = (req.body.language || "java").toLowerCase();
+        if (lang === "c++") lang = "cpp";
+        if (!allowedLangs.includes(lang)) return res.status(400).send("Unsupported language");
+
+        const code = await callGroq(SYSTEM_PROMPT, `Language: ${lang}\nQuestion: ${q}`);
+        res.type("text/plain").send(code);
     } catch (err) {
         res.status(500).send("Error: " + err.message);
     }
 });
 
 app.post("/api/fix", async (req, res) => {
-    const code = req.body.code;
-    let language = (req.body.language || "java").toLowerCase();
-
-    if (!code) {
-        return res.status(400).send("Error: Code is required");
-    }
-    if (language === "c++") language = "cpp";
-    if (!allowedLangs.includes(language)) {
-        return res.status(400).send("Error: Unsupported language");
-    }
-
     try {
-        const fixedCode = await callGroq(FIX_PROMPT, `Language: ${language}\nBuggy Code:\n${code}`);
-        res.json({ fixedCode, language });
+        const code = req.body.code;
+        if (!code) return res.status(400).send("Code required");
+        let lang = (req.body.language || "java").toLowerCase();
+        if (lang === "c++") lang = "cpp";
+        if (!allowedLangs.includes(lang)) return res.status(400).send("Unsupported language");
+
+        const fixed = await callGroq(FIX_PROMPT, `Language: ${lang}\nBuggy Code:\n${code}`);
+        res.json({ fixedCode: fixed, language: lang });
     } catch (err) {
-        res.status(500).send("Error: " + err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Global Error Handler
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).send("Something went wrong!");
-});
-
-// ============================================
-// START (bind to 0.0.0.0 for Render)
-// ============================================
-app.listen(PORT, '0.0.0.0', () => {
-    console.log("=================================");
-    console.log("   🚀 CodeAI API (Enhanced)");
-    console.log("=================================");
-    console.log(`Running on port ${PORT}`);
-    console.log(`API Key: ${API_KEY ? "✅" : "❌"}`);
-    console.log(`Pre‑loaded solutions: ${knownSolutions.size}`);
+// ----------------------------------------------------------------------
+// START (must bind to 0.0.0.0 for Render)
+// ----------------------------------------------------------------------
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on port ${PORT}`);
 });
