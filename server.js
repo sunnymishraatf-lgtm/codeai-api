@@ -1,103 +1,260 @@
+require("dotenv").config();
+
 const express = require("express");
+const helmet = require("helmet");
+const cors = require("cors");
+const compression = require("compression");
+const rateLimit = require("express-rate-limit");
 const bodyParser = require("body-parser");
-const fs = require("fs");
+const fs = require("fs").promises;          // promises for async
 const path = require("path");
-
-const app = express();
-app.use(bodyParser.json());
+const { v4: uuidv4 } = require("uuid");
+const winston = require("winston");
+const NodeCache = require("node-cache");
+const Joi = require("joi");
 
 // ============================================
-// CONFIG
+// CONFIGURATION & ENVIRONMENT
 // ============================================
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const PORT = process.env.PORT || 3000;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const NODE_ENV = process.env.NODE_ENV || "development";
 const allowedLangs = ["java", "python", "cpp", "c++", "vhdl"];
 
+// ---- Logger ----
+const logger = winston.createLogger({
+    level: NODE_ENV === "production" ? "info" : "debug",
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.errors({ stack: true }),
+        winston.format.json()
+    ),
+    defaultMeta: { service: "codeai-api" },
+    transports: [
+        new winston.transports.Console({
+            format: winston.format.combine(
+                winston.format.colorize(),
+                winston.format.simple()
+            )
+        })
+    ]
+});
+
+if (!GROQ_API_KEY) {
+    logger.error("❌ GROQ_API_KEY is not set. AI features will fail.");
+    // In production you might want to exit, but we leave it running for health checks.
+}
+
+// ---- Cache (in-memory) ----
+const codeCache = new NodeCache({ stdTTL: 600, checkperiod: 120 }); // 10 min TTL
+
 // ============================================
-// PROMPT
+// SYSTEM PROMPT (EXACTLY AS REQUESTED)
 // ============================================
 const SYSTEM_PROMPT = `
-You are an expert programming assistant.
+You are a senior software engineer and competitive programming expert.
 
-Your job is to return ONLY the final working source code based on the user's question.
+Your task is to generate COMPLETE, CORRECT, and EXECUTABLE source code for the user's programming question.
 
-STRICT RULES:
-1. Output ONLY raw code.
-2. Do NOT use markdown formatting.
+STRICT OUTPUT RULES:
+1. Output ONLY raw source code.
+2. Do NOT use markdown.
 3. Do NOT add explanations, comments, notes, headings, or extra text.
 4. Do NOT repeat the question.
-5. Do NOT include \`\`\` or language tags.
-6. Generate complete and executable code.
-7. The code must directly solve the exact problem asked by the user.
-8. Keep the code simple, clean, and beginner-friendly.
-9. Avoid unnecessary complexity.
-10. Use fast and optimized logic when possible.
-11. Include all required imports/libraries.
-12. If input/output format is mentioned, follow it exactly.
-13. Do not leave incomplete functions or placeholders.
-14. If multiple approaches exist, return the most reliable one.
-15. Ensure the code runs without syntax errors.
-16. Use only the programming language requested by the user.
-17. Never give pseudocode.
-18. Never explain anything before or after the code.
-19. If the user provides buggy code, return the corrected full code only.
-20. Always prioritize correctness over creativity.
-
-Your response must contain nothing except the final code.
+5. Do NOT include backticks.
+6. Return a complete runnable program.
+7. Include all necessary imports.
+8. Follow the exact input/output format from the question.
+9. Never leave incomplete functions, TODOs, placeholders, or pseudocode.
+10. Use only the programming language requested by the user.
+11. Ensure the code is syntactically correct.
+12. Ensure the code is logically correct.
+13. Avoid runtime errors.
+14. Avoid compilation errors.
+15. Handle edge cases properly.
+16. Prefer beginner-friendly and readable solutions.
+17. If user code contains bugs, return the fully corrected code only.
+18. Do NOT explain fixes.
+19. Before outputting, internally verify:
+   - syntax correctness
+   - compilation correctness
+   - runtime safety
+   - variable declarations
+   - imports
+   - class names
+   - function completeness
+20. If the question is ambiguous, choose the most standard correct implementation.
+21. Never output partial code.
+22. The final response must contain ONLY the final code.
 `;
 
 // ============================================
-// EXTENSION HELPER
+// UTILITY FUNCTIONS
 // ============================================
-function getExtension(lang) {
-    switch (lang) {
-        case "java": return "java";
-        case "python": return "py";
-        case "cpp":
-        case "c++": return "cpp";
-        case "vhdl": return "vhd";
-        default: return "txt";
+
+/** Async wrapper to catch errors in route handlers */
+const asyncHandler = (fn) => (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+/** Custom application error */
+class AppError extends Error {
+    constructor(message, statusCode) {
+        super(message);
+        this.statusCode = statusCode;
+        this.isOperational = true;
+        Error.captureStackTrace(this, this.constructor);
     }
 }
 
-// ============================================
-// GROQ AI CALL
-// ============================================
-async function getCodeFromAI(question, language) {
-    if (!GROQ_API_KEY) {
-        throw new Error("No GROQ API key set.");
-    }
+/** Extension helper */
+const getExtension = (lang) => {
+    const map = { java: "java", python: "py", cpp: "cpp", "c++": "cpp", vhdl: "vhd" };
+    return map[lang] || "txt";
+};
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${GROQ_API_KEY}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            model: "llama-3.1-8b-instant",
-            messages: [
-                { role: "system", content: SYSTEM_PROMPT },
-                { role: "user", content: `Language: ${language}\nQuestion: ${question}` }
-            ],
-            temperature: 0.2
-        })
-    });
-
-    if (!response.ok) {
-        const err = await response.text();
-        throw new Error(`AI API error: ${response.status} - ${err}`);
+/** AI call with retry logic */
+const fetchWithRetry = async (url, options, retries = 2) => {
+    for (let i = 0; i <= retries; i++) {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 25000);
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            clearTimeout(timeout);
+            if (!response.ok) {
+                const errBody = await response.text();
+                throw new AppError(`AI API error: ${response.status} - ${errBody}`, 502);
+            }
+            return response;
+        } catch (err) {
+            if (i === retries) throw err;
+            logger.warn(`AI request failed (attempt ${i + 1}), retrying...`, { error: err.message });
+            await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // exponential backoff 1s, 2s
+        }
     }
+};
+
+/** Get code from Groq AI */
+const getCodeFromAI = async (question, language) => {
+    if (!GROQ_API_KEY) throw new AppError("GROQ API key not configured", 500);
+
+    const response = await fetchWithRetry(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${GROQ_API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                model: "llama-3.1-8b-instant",
+                messages: [
+                    { role: "system", content: SYSTEM_PROMPT },
+                    { role: "user", content: `Language: ${language}\nQuestion: ${question}` }
+                ],
+                temperature: 0.2,
+                max_tokens: 4000,
+            }),
+        }
+    );
 
     const data = await response.json();
+    if (!data?.choices?.[0]?.message?.content) {
+        throw new AppError("Invalid response structure from AI", 502);
+    }
+
     let code = data.choices[0].message.content;
 
-    // Post-processing: Strip markdown code blocks if the AI included them
-    code = code.replace(/```[\w]*\n([\s\S]*?)\n```/g, '$1'); // Removes ```lang ... ```
-    code = code.replace(/```/g, ''); // Removes stray backticks
-    
+    // Strip any accidental markdown fences
+    code = code.replace(/```[\w]*\n?([\s\S]*?)\n?```/g, "$1");
+    code = code.replace(/```/g, "");
+    code = code.replace(/^`|`$/g, "");
     return code.trim();
-}
+};
+
+// ============================================
+// EXPRESS APP SETUP
+// ============================================
+const app = express();
+
+// ---- Security headers ----
+app.use(helmet());
+
+// ---- CORS ----
+app.use(cors({
+    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",") : "*",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+// ---- Compression ----
+app.use(compression());
+
+// ---- Body parsing with size limits ----
+app.use(bodyParser.json({ limit: "1kb" }));
+app.use(bodyParser.urlencoded({ extended: false, limit: "1kb" }));
+
+// ---- Request ID ----
+app.use((req, res, next) => {
+    req.id = uuidv4();
+    res.setHeader("X-Request-ID", req.id);
+    next();
+});
+
+// ---- Logging middleware ----
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on("finish", () => {
+        logger.info({
+            requestId: req.id,
+            method: req.method,
+            url: req.originalUrl,
+            status: res.statusCode,
+            responseTime: `${Date.now() - start}ms`,
+        });
+    });
+    next();
+});
+
+// ---- Rate Limiting ----
+const generalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later.", success: false },
+});
+app.use(generalLimiter);
+
+const aiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 20,
+    message: { error: "AI request limit exceeded. Please slow down.", success: false },
+});
+app.use(["/ask", "/solve/raw"], aiLimiter);
+
+// ---- Input sanitization (basic) ----
+const sanitize = (str) => {
+    if (!str) return str;
+    return str.replace(/[<>{}]/g, "").trim().substring(0, 500);
+};
+
+// ============================================
+// VALIDATION SCHEMAS (Joi)
+// ============================================
+const askQuerySchema = Joi.object({
+    q: Joi.string().required().min(3).max(500).messages({
+        "string.empty": "Question (q) is required",
+        "string.min": "Question must be at least 3 characters",
+    }),
+    lang: Joi.string().valid(...allowedLangs, "c++").default("java"),
+    download: Joi.string().optional().max(100),
+});
+
+const solveBodySchema = Joi.object({
+    question: Joi.string().required().min(3).max(500),
+    language: Joi.string().valid(...allowedLangs, "c++").default("java"),
+});
 
 // ============================================
 // ROUTES
@@ -105,88 +262,190 @@ async function getCodeFromAI(question, language) {
 
 // Home
 app.get("/", (req, res) => {
-    res.send("CodeAI API is running 🚀");
+    res.json({
+        message: "CodeAI API is running 🚀",
+        version: "2.0.0",
+        endpoints: {
+            get: "/ask?q=question&lang=language&download=filename",
+            post: "/solve/raw",
+            health: "/health",
+        },
+        supportedLanguages: allowedLangs,
+    });
 });
 
-// 🔥 MAIN API
-app.get("/ask", async (req, res) => {
-    let question = req.query.q;
-    let language = (req.query.lang || "java").toLowerCase();
-    const downloadName = req.query.download;
-
-    if (!question) {
-        return res.send("Error: Question is required");
-    }
-
-    // ✅ convert dash to space
-    question = question.replace(/[-_]/g, " ");
-
-    // normalize
-    if (language === "c++") language = "cpp";
-
-    // validate
-    if (!allowedLangs.includes(language)) {
-        return res.send("Error: Unsupported language");
-    }
-
-    try {
-        const code = await getCodeFromAI(question, language);
-
-        // 🔥 DOWNLOAD MODE (custom filename)
-        if (downloadName) {
-            const safeName = downloadName.replace(/[^a-z0-9]/gi, "_").toLowerCase();
-            const filename = `${safeName}.${getExtension(language)}`;
-            const filepath = path.join(__dirname, filename);
-
-            fs.writeFileSync(filepath, code);
-
-            res.download(filepath, filename, () => {
-                fs.unlinkSync(filepath);
-            });
-
-        } else {
-            // NORMAL MODE
-            res.type("text/plain");
-            res.send(code);
+// Health check
+app.get("/health", async (req, res) => {
+    const health = {
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        groqConfigured: !!GROQ_API_KEY,
+    };
+    // Optional: quick connectivity test (cached for 30s)
+    if (GROQ_API_KEY) {
+        const cacheKey = "health_check_groq";
+        let reachable = codeCache.get(cacheKey);
+        if (reachable === undefined) {
+            try {
+                await fetch("https://api.groq.com/openai/v1/models", {
+                    headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+                    signal: AbortSignal.timeout(5000),
+                });
+                reachable = true;
+            } catch {
+                reachable = false;
+            }
+            codeCache.set(cacheKey, reachable, 30);
         }
-
-    } catch (err) {
-        res.send("Error: " + err.message);
+        health.groqReachable = reachable;
     }
+    res.json(health);
 });
 
-// POST API
-app.post("/solve/raw", async (req, res) => {
-    const question = req.body.question;
-    let language = (req.body.language || "java").toLowerCase();
-
-    if (!question) {
-        return res.status(400).send("Error: Question is required");
+// 🔥 Main GET ask endpoint
+app.get("/ask", asyncHandler(async (req, res) => {
+    // Validate query
+    const { error, value } = askQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) {
+        throw new AppError(error.details[0].message, 400);
     }
 
+    let { q: question, lang: language, download: downloadName } = value;
+
+    // Normalize language
     if (language === "c++") language = "cpp";
 
-    if (!allowedLangs.includes(language)) {
-        return res.status(400).send("Error: Unsupported language");
+    // Sanitize question (remove dashes/underscores)
+    question = sanitize(question.replace(/[-_]/g, " "));
+
+    // Check cache
+    const cacheKey = `code:${language}:${question}`;
+    let code = codeCache.get(cacheKey);
+
+    if (!code) {
+        logger.info("Cache miss, calling AI", { requestId: req.id, language, question });
+        code = await getCodeFromAI(question, language);
+        codeCache.set(cacheKey, code);
+    } else {
+        logger.info("Cache hit", { requestId: req.id, cacheKey });
     }
 
-    try {
-        const code = await getCodeFromAI(question, language);
+    // Download mode
+    if (downloadName) {
+        const safeName = downloadName.replace(/[^a-z0-9]/gi, "_").toLowerCase().substring(0, 50);
+        const filename = `${safeName}_${Date.now()}.${getExtension(language)}`;
+        const filepath = path.join(__dirname, "downloads", filename);
 
-        res.type("text/plain");
+        // Ensure downloads directory exists
+        await fs.mkdir(path.join(__dirname, "downloads"), { recursive: true });
+        await fs.writeFile(filepath, code, "utf8");
+
+        res.download(filepath, filename, async (err) => {
+            // Cleanup after download
+            try {
+                await fs.unlink(filepath);
+            } catch (unlinkErr) {
+                logger.error("Failed to delete temp file", { filepath, error: unlinkErr.message });
+            }
+            if (err) {
+                logger.error("Download error", { error: err.message });
+            }
+        });
+    } else {
+        // Normal mode: respond with raw code
+        res.set("Content-Type", "text/plain; charset=utf-8");
         res.send(code);
-
-    } catch (err) {
-        res.status(500).send("Error: " + err.message);
     }
+}));
+
+// POST solve endpoint
+app.post("/solve/raw", asyncHandler(async (req, res) => {
+    const { error, value } = solveBodySchema.validate(req.body, { stripUnknown: true });
+    if (error) {
+        throw new AppError(error.details[0].message, 400);
+    }
+
+    let { question, language } = value;
+    if (language === "c++") language = "cpp";
+
+    question = sanitize(question);
+
+    const cacheKey = `code:${language}:${question}`;
+    let code = codeCache.get(cacheKey);
+
+    if (!code) {
+        logger.info("POST cache miss, calling AI", { requestId: req.id, language, question });
+        code = await getCodeFromAI(question, language);
+        codeCache.set(cacheKey, code);
+    }
+
+    res.set("Content-Type", "text/plain; charset=utf-8");
+    res.send(code);
+}));
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({ error: "Not found", success: false });
+});
+
+// Centralized error handler
+app.use((err, req, res, next) => {
+    logger.error({
+        requestId: req.id,
+        error: err.message,
+        stack: err.stack,
+        statusCode: err.statusCode || 500,
+    });
+
+    if (err.isOperational) {
+        return res.status(err.statusCode).json({
+            error: err.message,
+            success: false,
+        });
+    }
+
+    // Unexpected errors
+    return res.status(500).json({
+        error: NODE_ENV === "production" ? "Internal server error" : err.message,
+        success: false,
+    });
 });
 
 // ============================================
-// START
+// GRACEFUL SHUTDOWN
 // ============================================
-app.listen(PORT, () => {
-    console.log("=================================");
-    console.log("   🚀 CodeAI API (FINAL VERSION)");
-    console.log("=================================");
-    console.log(`Running on port ${PORT}`);
+const server = app.listen(PORT, () => {
+    logger.info(`🚀 CodeAI API running on port ${PORT}`);
+    logger.info(`Supported languages: ${allowedLangs.join(", ")}`);
+    logger.info(`GROQ API: ${GROQ_API_KEY ? "✅ Configured" : "❌ Not configured"}`);
 });
+
+// Handle termination signals
+const shutdown = async (signal) => {
+    logger.info(`${signal} received. Shutting down gracefully...`);
+    server.close(() => {
+        logger.info("HTTP server closed.");
+        // Close cache or other connections if needed
+        codeCache.close();
+        process.exit(0);
+    });
+
+    // Force shutdown after 10s
+    setTimeout(() => {
+        logger.error("Forced shutdown after timeout.");
+        process.exit(1);
+    }, 10000);
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (reason) => {
+    logger.error("Unhandled Rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+    logger.error("Uncaught Exception:", err);
+    process.exit(1);
+});
+
+module.exports = app; // for testing
